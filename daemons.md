@@ -73,7 +73,7 @@ iSCSI initiator, multipath, LVM monitoring, NVMe-oF/FC autoconnect, RDMA session
 `srp_daemon_port@.service`
 
 > Note: `srp_daemon` is the iSER/RDMA *session* daemon, unrelated to the CX7 RoCE data path
-> used for tensor parallelism. NCCL/RDMA still works with it disabled.
+> used for inter-node collectives. NCCL/RDMA still works with it disabled.
 
 ### IPMI sidecar
 
@@ -172,8 +172,31 @@ rule, `/lib/udev/rules.d/90-mtk-hotplug.rules`, invoking
 events for the `cx7-pcie-hotplug` driver bound to `MTKP0001:00`. Do not "clean up" that
 directory or the rule; it is what makes the ConnectX-7 ports appear when you seat a cable.
 
-And left installed on purpose: `nvidia-system-station{,-core,-apps,-common,-utils,-games,
+Also left installed on purpose: `nvidia-system-station{,-core,-apps,-common,-utils,-games,
 -localization}`, `dgxstation-desktop`, `dgx-dashboard`, `nvidia-ai-workbench`,
 `nvidia-system-{core,extra,utils}`. These are desktop *bundles*, not drivers. Removing them
 risks `apt` pulling neighbours like `nvidia-system-extra`, which owns `docker-ce`, `git`,
 `iperf` and `perftest`. Disabling the desktop target captures the memory without that risk.
+
+### The autoremove trap (measured, not theoretical)
+
+Removing the obvious-looking desktop apps reports a reassuringly small transaction — **19
+packages, 11.8 MB freed** — and then the "automatically installed and no longer required" list
+it prints contains things you did not consent to losing:
+
+```
+nvidia-update-manager    nvidia-plymouth    dgxstation-grub
+dgxstation-desktop       nv-yaru-theme-all  samba
+avahi-utils              kpartx-boot        vino
+```
+
+`nvidia-update-manager` is the platform firmware/OTA front-end. It appears only because the
+bundle you removed was its last reverse dependency; running the suggested `apt autoremove`
+takes it with it. On a box whose ConnectX-7 firmware is managed through LVFS/fwupd, that is a
+bad trade for eleven megabytes.
+
+The rule this establishes: **the removal plan is not the transaction.** Always read the
+"no longer required" block as part of what you are approving, and treat any `nvidia-*`,
+`dgx*`, `mlnx*`, `fwupd*`, `cuda*` or `linux-*` name appearing there as a reason to abort.
+Disk space on these boxes is essentially never the binding constraint — RAM is. Debloat by
+disabling units, not by removing packages.

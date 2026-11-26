@@ -109,6 +109,8 @@ phone. Do not rely on noticing later.
   works, and accept that some failures need a power cycle.
 - **Slow leaks.** earlyoom fires at 1 GiB free; a leak that takes three days to arrive will
   first show up as degraded performance. Watch KV-cache headroom over time separately.
-- **Both nodes at once.** In a two-node tensor-parallel setup, earlyoom killing rank 1 aborts
-  the job on rank 0 anyway. Its value there is keeping the *machine* reachable so you can read
-  the logs — which is still worth a lot compared to a power cycle.
+- **Multi-node jobs.** earlyoom protects the *machine*, not the *job*. If ranks span nodes,
+  killing a rank on one box aborts the job on all of them anyway. Its value there is keeping
+  the node reachable so you can read the logs — which is still worth a lot compared to a power
+  cycle. Size your `--prefer` regex accordingly: if you want the whole engine down rather than
+  a partial teardown, match every worker process, not just one role.

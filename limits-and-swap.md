@@ -33,9 +33,10 @@ Two things to know:
    ulimit -l ; ulimit -n
    ```
 
-`nofile 500000`: tensor-parallel ranks open a lot — one socket per peer per channel, plus
-shard files, plus RDMA completion eventfds. The default 1024 is far too low and produces
-`Too many open files` at a rank-count-dependent point, which makes it look like a topology bug.
+`nofile 500000`: parallel inference opens a lot of descriptors — one socket per peer per
+channel, plus shard files, plus RDMA completion eventfds. The default 1024 is far too low and
+produces `Too many open files` at a rank-count-dependent point, which makes it look like a
+topology bug.
 
 Also required on the container for `memlock` to actually be usable:
 

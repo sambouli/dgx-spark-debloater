@@ -1,7 +1,7 @@
-# DGX Spark (GB10) — two-node inference node hardening
+# dgx-spark-debloater — lean inference-node baseline for the DGX Spark
 
-Baseline system configuration applied to two NVIDIA DGX Spark (GB10) boxes that run a
-two-node tensor-parallel LLM inference engine over RoCE/RDMA.
+Baseline system configuration applied to NVIDIA DGX Spark (GB10) boxes running large-model
+LLM inference.
 
 The goal is simple: on a 121 GiB **unified** memory pool, every resident daemon and
 every page of swap is memory and latency taken away from the model. This repo records
@@ -10,6 +10,13 @@ fresh box instead of being re-derived by trial and error.
 
 This is a **headless inference node**, not a workstation. Nothing here is a
 recommendation for a desktop.
+
+**Node count is irrelevant.** Every setting here is per-node and applies identically to a
+single Spark or a rack of them. Nothing depends on how many nodes you have or how they are
+wired together. The one place multi-node changes anything is *operational*, not
+configurative: when ranks span machines, killing one rank aborts the job everywhere, so the
+value of OOM protection shifts from "the job survives" to "the machine stays reachable so you
+can read its logs." See [`oom-protection.md`](oom-protection.md).
 
 ## Contents
 
