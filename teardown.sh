@@ -43,7 +43,9 @@ fi
   run sh -c 'echo always > /sys/kernel/mm/transparent_hugepage/enabled'
 
 log "== removing tuning drop-ins =="
-for f in /etc/systemd/system/docker.service.d/99-inference-node-limits.conf \
+for f in /etc/systemd/system/docker.service.d/zz-inference-node-limits.conf \
+         /etc/systemd/system/containerd.service.d/zz-inference-node-limits.conf \
+         /etc/systemd/system/docker.service.d/99-inference-node-limits.conf \
          /etc/systemd/system/containerd.service.d/99-inference-node-limits.conf; do
   if [ -f "$f" ]; then
     log "  rm $f"

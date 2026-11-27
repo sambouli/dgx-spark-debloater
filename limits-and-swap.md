@@ -34,17 +34,39 @@ systemctl show docker -p LimitMEMLOCK          # want: infinity
 tr '\0' '\n' < /proc/$(pgrep -x dockerd)/limits | grep -i 'locked memory'
 ```
 
-### The drop-in name is load-bearing
+### The drop-in name is load-bearing — last writer wins
 
-Platform images frequently ship their own override pinning memlock low — e.g.
-`docker.service.d/docker-override.conf` with `LimitMEMLOCK=8388608` (8 MiB). systemd applies
-drop-ins **in lexicographic order**, so a file named `10-memlock.conf` sorts *before*
-`docker-override.conf`, loses, and changes nothing — while `ls` shows your file sitting right
-there looking correct.
+systemd merges drop-ins in **lexicographic order and the last writer of a key wins**. So a
+high-sorting name does **not** override anything; it gets overridden. Platform images commonly
+ship `docker.service.d/docker-override.conf` pinning `LimitMEMLOCK=8388608` (8 MiB), and because
+`d` sorts after `9`, a file called `99-inference-node-limits.conf` loses to it — silently, while
+`ls` shows your file sitting right there looking applied.
 
-This baseline writes `99-inference-node-limits.conf` specifically to sort after vendor names
-(`docker-override.conf`, `10-*`, `50-*`). If you write your own, keep it high-sorting and verify
-the *effective* value, never the file:
+Measured on this platform, not inferred:
+
+| file | value | effective |
+|---|---|---|
+| `docker-override.conf` | 111111 | **111111** |
+| `99-inference-node-limits.conf` | 222222 | ← ignored |
+
+This baseline therefore writes **`zz-inference-node-limits.conf`**, which sorts after the usual
+vendor names (`docker-override.conf`, `10-*`, `50-*`, `99-*`). If you write your own, use a
+low-sorting name and verify the *effective* value — never the file:
+
+```bash
+cat /etc/systemd/system/docker.service.d/*.conf   # see all contributors
+systemctl show docker -p LimitMEMLOCK              # the only answer that counts
+```
+
+To check the precedence rule yourself on a harmless unit:
+
+```bash
+d=/etc/systemd/system/cron.service.d; mkdir -p $d
+printf '[Service]\nLimitNOFILE=111111\n' > $d/docker-override.conf
+printf '[Service]\nLimitNOFILE=222222\n' > $d/zz-test.conf
+systemctl daemon-reload; systemctl show cron -p LimitNOFILE   # want 222222
+rm -f $d/*; rmdir $d; systemctl daemon-reload
+```
 
 ```bash
 cat /etc/systemd/system/docker.service.d/*.conf   # see all contributors

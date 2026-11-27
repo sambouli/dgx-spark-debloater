@@ -299,25 +299,33 @@ if [ ! -f /etc/security/limits.d/99-inference-node.conf ] || [ "$DRY" = 0 ]; the
 EOF
 fi
 
-# Service-side memlock. Vendor images frequently ship their own docker override
-# pinning LimitMEMLOCK (e.g. 8388608), so this file is named to sort AFTER any
-# such override: systemd applies drop-ins in lexicographic order, and a name
-# like 10-*.conf would lose to docker-override.conf and change nothing.
+# Service-side memlock. CAREFUL WITH THE FILENAME.
+#
+# systemd merges drop-ins in lexicographic order and the LAST writer of a key
+# wins. So a high-sorting name such as 99-*.conf LOSES to a vendor file like
+# docker-override.conf ('d' > '9'), silently leaving the vendor value in place
+# while your file sits there looking applied. Verified empirically on this
+# platform: with docker-override.conf=111111 and 99-*.conf=222222, the
+# effective value was 111111.
+#
+# Hence zz- : sorts after the usual vendor names (docker-override.conf, 10-*,
+# 50-*, 99-*). This is verified against the live unit below -- do not trust the
+# filename, trust `systemctl show`.
 log "  service limits (systemd drop-in)"
 for svc in docker containerd; do
   if ! systemctl list-unit-files "${svc}.service" --no-legend 2>/dev/null | grep -q .; then
     continue
   fi
   dir="/etc/systemd/system/${svc}.service.d"
-  # 99- sorts after typical vendor names (docker-override.conf, 10-*, 50-*)
-  target="$dir/99-inference-node-limits.conf"
+  target="$dir/zz-inference-node-limits.conf"
+  # migrate away from the old, ineffective name if present
+  [ -f "$dir/99-inference-node-limits.conf" ] && run rm -f "$dir/99-inference-node-limits.conf"
   if [ ! -f "$target" ] || [ "$DRY" = 0 ]; then
     log "    write $target"
     if [ "$DRY" = 0 ]; then
       mkdir -p "$dir"
       cat > "$target" <<'EOF'
-# Must sort after vendor overrides: systemd applies drop-ins in lexicographic
-# order, so a lower-sorting name would be overridden rather than override.
+# zz- so this is merged LAST and wins over vendor drop-ins (last writer wins).
 [Service]
 LimitMEMLOCK=infinity
 LimitNOFILE=524288
