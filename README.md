@@ -137,9 +137,38 @@ ps -o args= -C earlyoom            # shows the live EARLYOOM_ARGS
 journalctl -u earlyoom --since -1d # past kills are logged here
 ```
 
-The shipped policy: act under 1 GiB free, `SIGTERM` not `SIGKILL` (so pinned memory is released
-cleanly), rate-limited to one kill per hour, and `--avoid` on `systemd`, `sshd`, `dockerd`,
+The shipped policy: act under **1.5 GiB** free, `SIGTERM` not `SIGKILL` (so pinned memory is
+released cleanly), rate-limited to one kill per hour, and `--avoid` on `systemd`, `sshd`, `dockerd`,
 `containerd`, `dbus-daemon`, `NetworkManager`, `gdm`, `Xorg`, `nvidia`.
+
+### Tuning the threshold (`EARLYOOM_TERM_KIB` / `EARLYOOM_KILL_KIB`)
+
+The 1 GiB trigger that most recipes ship assumes the engine leaves about 2 GiB of headroom. When it
+does not, that number is too aggressive and the engine dies mid-request. Measured on a 2x DGX
+Spark pair serving a 1M-context MoE (~99 GiB of weights per node, 121 GiB RAM):
+
+| Point | MemAvailable |
+|---|---|
+| engine idle after warm-up | ~3.0 GiB |
+| 197k-token prompt arriving beside a live stream | 1.01 GiB |
+| earlyoom 1 GiB trigger | **fired**, engine SIGTERM'd mid-prefill |
+
+The engine's own floor (`TF_DS_MEM_FLOOR_GIB=2.0`) sits *above* a 1 GiB trigger, so the host killed
+the engine before the engine's own admission gate ever got a chance to refuse work. That ordering is
+the bug: the guard must fire below the thing it is protecting, not above it.
+
+Defaults here are **1.5 GiB / 1.0 GiB** (SIGTERM / SIGKILL). Override when your engine's floor
+differs:
+
+```bash
+sudo WITH_EARLYOOM=1 EARLYOOM_PREFER='^tensorfold' \
+     EARLYOOM_TERM_KIB=1572864 EARLYOOM_KILL_KIB=1048576 ./setup.sh
+```
+
+Keep `EARLYOOM_TERM_KIB` comfortably above the engine's own floor, or you get the inverted ordering
+above. Do not go far below 1 GiB: `--avoid` keeps `sshd`/`dockerd` alive, and the point of the daemon
+is that the node stays reachable when memory runs out.
+
 
 If the workload spans processes or nodes, match **every** worker rather than one role — killing a
 single rank aborts the job everywhere anyway, so a partial teardown buys nothing.
@@ -156,6 +185,45 @@ sudo ./teardown.sh     # revert
 
 Both scripts are idempotent and print what they change. Run `setup.sh` twice: the second
 run should report nothing to do.
+
+## Keeping the engine alive after `setup.sh`
+
+Debloating makes the node lean; it does not restart your engine when a crash or an OOM stop takes
+it down. If you want that, a user unit works — but read this trap first:
+
+**A launcher that exits once the API answers defeats `Restart=on-failure`.** Many project
+`start.sh` scripts launch containers and then `exit 0` when the health endpoint replies. An
+`ExecStart=` pointing at such a script succeeds immediately, the unit goes inactive, and systemd
+never sees a failure to restart.
+
+Wrap it instead: start the engine, then stay in the foreground watching for the thing that actually
+breaks (container gone, API unhealthy) and exit nonzero so systemd restarts the whole group:
+
+```ini
+# ~/.config/systemd/user/<engine>.service
+[Service]
+Type=simple
+ExecStart=/home/<user>/supervise.sh
+ExecStop=/path/to/stop.sh
+Restart=on-failure
+RestartSec=30
+```
+
+```bash
+#!/usr/bin/env bash
+set -uo pipefail
+/path/to/start.sh || exit 1            # returns 0 once healthy
+while :; do
+  sleep 15
+  curl -fsS  http://127.0.0.1:<port>/v1/models >/dev/null 2>&1 || exit 1
+  docker ps --format '{{.Names}}' | grep -q '^<container>$' || exit 1
+done
+```
+
+Then `loginctl enable-linger <user>` so it survives logout and starts at boot. For tensor-parallel
+serving, restart every rank **together, rank 0 first** — a rank that comes back alone will hang
+waiting on the other's rendezvous port.
+
 
 ## Verifying
 
