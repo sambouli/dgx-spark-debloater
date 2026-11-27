@@ -43,6 +43,18 @@ fi
   run sh -c 'echo always > /sys/kernel/mm/transparent_hugepage/enabled'
 
 log "== removing tuning drop-ins =="
+for f in /etc/systemd/system/docker.service.d/99-inference-node-limits.conf \
+         /etc/systemd/system/containerd.service.d/99-inference-node-limits.conf; do
+  if [ -f "$f" ]; then
+    log "  rm $f"
+    run rm -f "$f"
+    # leave vendor overrides (docker-override.conf etc.) strictly alone
+    d=$(dirname "$f"); rmdir "$d" 2>/dev/null || true
+  fi
+done
+if [ "$DRY" = 0 ]; then systemctl daemon-reload; fi
+log "  NOTE: restoring the previous LimitMEMLOCK needs 'systemctl restart docker'"
+log "        (read at process start). Vendor override files were not modified."
 for f in /etc/sysctl.d/99-inference-node.conf /etc/security/limits.d/99-inference-node.conf; do
   if [ -f "$f" ]; then
     log "  rm $f"

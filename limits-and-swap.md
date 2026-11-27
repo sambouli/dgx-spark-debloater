@@ -16,33 +16,63 @@ weight loading, with an error that mentions neither limits nor memory.
 *    hard   nofile    500000
 ```
 
-Two things to know:
+### Two mechanisms — writing only one is the classic silent failure
 
-1. **`limits.d` does not reach containers by default.** A container inherits the *daemon's*
-   limits unless overridden. So set it in three places: `limits.d` for login sessions,
-   `--ulimit memlock=-1` on every `docker run`, and the systemd slice if you launch via
-   systemd. Verify inside the container, not just on the host:
-   ```bash
-   docker exec <name> sh -c 'ulimit -l'      # must say unlimited
-   ```
-2. **The platform image already ships this** (`99-nv-spark-limits.conf`, `nv-limits.conf`).
-   Our drop-in is redundant but harmless, and it survives a platform package change that
-   drops theirs. Check before assuming:
-   ```bash
-   cat /etc/security/limits.d/*memlock* /etc/security/limits.d/*nofile* 2>/dev/null
-   ulimit -l ; ulimit -n
-   ```
+| File | Read by | Covers |
+|---|---|---|
+| `/etc/security/limits.d/*.conf` | `pam_limits` | **login sessions only** |
+| `/etc/systemd/system/<svc>.service.d/*.conf` | systemd | **services** (dockerd, containerd) |
+
+A container inherits the **daemon's** limits, and a systemd-started daemon never reads
+`limits.d`. So `memlock unlimited` in `limits.d` looks configured, passes `ulimit -l` in your
+SSH session, and does absolutely nothing for containers. This is the single most common way the
+setting gets "applied" without ever taking effect. Set both:
+
+```bash
+# services -- what actually matters for RDMA from containers
+systemctl show docker -p LimitMEMLOCK          # want: infinity
+tr '\0' '\n' < /proc/$(pgrep -x dockerd)/limits | grep -i 'locked memory'
+```
+
+### The drop-in name is load-bearing
+
+Platform images frequently ship their own override pinning memlock low — e.g.
+`docker.service.d/docker-override.conf` with `LimitMEMLOCK=8388608` (8 MiB). systemd applies
+drop-ins **in lexicographic order**, so a file named `10-memlock.conf` sorts *before*
+`docker-override.conf`, loses, and changes nothing — while `ls` shows your file sitting right
+there looking correct.
+
+This baseline writes `99-inference-node-limits.conf` specifically to sort after vendor names
+(`docker-override.conf`, `10-*`, `50-*`). If you write your own, keep it high-sorting and verify
+the *effective* value, never the file:
+
+```bash
+cat /etc/systemd/system/docker.service.d/*.conf   # see all contributors
+systemctl show docker -p LimitMEMLOCK              # the one answer that counts
+```
+
+Then restart the daemon — `LimitMEMLOCK` is read at process start, so a reload alone leaves the
+running daemon capped. Restarting docker stops running containers, so do it deliberately.
+
+Also required on the container itself for memlock to be usable:
+
+```
+--cap-add IPC_LOCK --ulimit memlock=-1 --ulimit stack=67108864
+```
+
+Verify inside the container, not just on the host:
+
+```bash
+docker exec <name> sh -c 'ulimit -l'      # must say unlimited
+```
+
+Note the platform image may already ship `99-nv-spark-limits.conf` / `nv-limits.conf` in
+`limits.d`. Those cover login sessions only — they do not exempt you from the systemd drop-in.
 
 `nofile 500000`: parallel inference opens a lot of descriptors — one socket per peer per
 channel, plus shard files, plus RDMA completion eventfds. The default 1024 is far too low and
 produces `Too many open files` at a rank-count-dependent point, which makes it look like a
 topology bug.
-
-Also required on the container for `memlock` to actually be usable:
-
-```
---cap-add IPC_LOCK --ulimit memlock=-1 --ulimit stack=67108864
-```
 
 ## Swap — off at the source
 

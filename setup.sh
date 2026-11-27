@@ -281,14 +281,70 @@ fi
 log "  compaction_proactiveness=$(cat /proc/sys/vm/compaction_proactiveness 2>/dev/null)"
 log "  min_free_kbytes=$(cat /proc/sys/vm/min_free_kbytes 2>/dev/null)"
 
+# Two DIFFERENT mechanisms, because they cover different things -- writing only
+# the first is a classic silent failure.
+#
+#   limits.d  -> read by pam_limits, so it applies to LOGIN sessions only.
+#                It does nothing for anything systemd starts.
+#   drop-in   -> read by systemd, required for services (dockerd, containerd)
+#                and therefore for containers doing RDMA / pinned allocations.
 if [ ! -f /etc/security/limits.d/99-inference-node.conf ] || [ "$DRY" = 0 ]; then
   run tee /etc/security/limits.d/99-inference-node.conf >/dev/null <<'EOF'
-# RDMA queue pairs and pinned GPU buffers must be lockable in memory.
+# Applies to login (PAM) sessions only -- see the systemd drop-in below for
+# services. RDMA queue pairs and pinned GPU buffers must be lockable.
 *    soft   memlock   unlimited
 *    hard   memlock   unlimited
 *    soft   nofile    500000
 *    hard   nofile    500000
 EOF
+fi
+
+# Service-side memlock. Vendor images frequently ship their own docker override
+# pinning LimitMEMLOCK (e.g. 8388608), so this file is named to sort AFTER any
+# such override: systemd applies drop-ins in lexicographic order, and a name
+# like 10-*.conf would lose to docker-override.conf and change nothing.
+log "  service limits (systemd drop-in)"
+for svc in docker containerd; do
+  if ! systemctl list-unit-files "${svc}.service" --no-legend 2>/dev/null | grep -q .; then
+    continue
+  fi
+  dir="/etc/systemd/system/${svc}.service.d"
+  # 99- sorts after typical vendor names (docker-override.conf, 10-*, 50-*)
+  target="$dir/99-inference-node-limits.conf"
+  if [ ! -f "$target" ] || [ "$DRY" = 0 ]; then
+    log "    write $target"
+    if [ "$DRY" = 0 ]; then
+      mkdir -p "$dir"
+      cat > "$target" <<'EOF'
+# Must sort after vendor overrides: systemd applies drop-ins in lexicographic
+# order, so a lower-sorting name would be overridden rather than override.
+[Service]
+LimitMEMLOCK=infinity
+LimitNOFILE=524288
+EOF
+    else
+      echo "  [dry] write $target (LimitMEMLOCK=infinity)"
+    fi
+  fi
+done
+
+# A drop-in is inert until systemd reloads AND the daemon restarts -- LimitMEMLOCK
+# is read at process start. Warn rather than silently restart a running engine.
+if [ "$DRY" = 0 ]; then
+  if systemctl daemon-reload; then :; fi
+  for svc in docker containerd; do
+    tgt="/etc/systemd/system/${svc}.service.d/99-inference-node-limits.conf"
+    [ -f "$tgt" ] || continue
+    cur=$(systemctl show "$svc.service" -p LimitMEMLOCK --value 2>/dev/null)
+    if [ "$cur" != "infinity" ]; then
+      log "    NOTE: $svc still reports LimitMEMLOCK=$cur."
+      log "          The drop-in is written but takes effect only after"
+      log "            systemctl restart $svc"
+      log "          which stops running containers -- do it deliberately."
+    else
+      log "    $svc: LimitMEMLOCK=infinity (live)"
+    fi
+  done
 fi
 
 # ---------------------------------------------------------------------------
