@@ -341,7 +341,7 @@ done
 if [ "$DRY" = 0 ]; then
   if systemctl daemon-reload; then :; fi
   for svc in docker containerd; do
-    tgt="/etc/systemd/system/${svc}.service.d/99-inference-node-limits.conf"
+    tgt="/etc/systemd/system/${svc}.service.d/zz-inference-node-limits.conf"
     [ -f "$tgt" ] || continue
     cur=$(systemctl show "$svc.service" -p LimitMEMLOCK --value 2>/dev/null)
     if [ "$cur" != "infinity" ]; then
