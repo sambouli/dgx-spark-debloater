@@ -413,8 +413,24 @@ EOF
   else
     echo "  [dry] write /etc/default/earlyoom with --prefer $EARLYOOM_PREFER"
   fi
-  run systemctl enable --now earlyoom
-  log "  earlyoom: $(systemctl is-active earlyoom 2>/dev/null)"
+  # NOT `enable --now`: if the unit is already enabled AND active (the normal
+  # case on images that ship earlyoom), systemd sees it as satisfied and does
+  # nothing -- leaving the daemon running with the OLD EnvironmentFile. The new
+  # EARLYOOM_ARGS would sit on disk, applied-looking but inert. Restart instead.
+  run systemctl enable earlyoom
+  run systemctl restart earlyoom
+  if [ "$DRY" = 0 ]; then
+    live=$(ps -o args= -C earlyoom 2>/dev/null | grep -o -- "--prefer [^ ]*")
+    if [ "$live" = "--prefer $EARLYOOM_PREFER" ]; then
+      log "  earlyoom: active, $live (matches config)"
+    else
+      log "  WARNING: earlyoom is running '$live' but config says '--prefer $EARLYOOM_PREFER'"
+      log "           The daemon did not pick up the new config. Check:"
+      log "             systemctl status earlyoom ; cat /etc/default/earlyoom"
+    fi
+  else
+    log "  earlyoom: (dry-run) would enable + restart"
+  fi
 else
   log ""
   log "skipped (optional): earlyoom OOM protection."
