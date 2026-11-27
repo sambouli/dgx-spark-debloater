@@ -78,34 +78,28 @@ than a debloating one. Enable it explicitly:
 docker exec <container> ps -eo comm,rss --sort=-rss | head
 
 sudo WITH_EARLYOOM=1 ./setup.sh                                   # shipped default
-sudo WITH_EARLYOOM=1 EARLYOOM_PREFER='sglang' ./setup.sh          # your own
+sudo WITH_EARLYOOM=1 EARLYOOM_PREFER='^tensorfold' ./setup.sh
 ```
 
-### Scope of the shipped default
+### Choosing `EARLYOOM_PREFER` — no default on purpose
 
-It is `'^VLLM|^vllm|llama-server|^ollama'` — verified against live containers, covering
-**vLLM, llama.cpp and Ollama**. It is deliberately narrow, and it is **not** a general-purpose
-inference pattern. Servers such as SGLang, TensorRT-LLM, Triton or TGI will not match it; pass
-`EARLYOOM_PREFER` for those.
+There is **no shipped default**, and that is deliberate. The pattern must name the process that
+actually serves on *your* node, and the obvious ways to guess it are all unreliable:
 
-Two reasons for the narrowness:
+- the **project** name (`tensorfold`) is often right but not guaranteed;
+- the **image** name (`tensorfold-dsv41`) is almost never the process name;
+- the **framework** you expect (`vllm`) may be wrapped by a launcher.
 
-- A pattern that matches nothing is worse than no earlyoom at all (see the guard below), so a
-  broad guess-the-name default would be actively harmful.
-- The obvious widening — adding `python3` — is a trap. Most Python inference servers *also* show
-  a `python3` process, so matching it would let earlyoom kill unrelated host Python: monitoring,
-  cron jobs, your own shells. Match the worker's real name, never the interpreter.
+So `setup.sh` requires the variable and refuses to install without it. Determine the real name by
+observation:
 
-`^VLLM` is anchored on the truncated form on purpose: `comm` cuts off at 15 characters, so
-`VLLM::EngineCore` appears as `VLLM::EngineCor`.
+```bash
+docker exec <container> ps -eo comm,rss --sort=-rss | head
+```
 
-### Why it exists
-
-On a unified-memory box the kernel OOM killer scores candidates by resident size, so the largest
-process — usually your inference engine — is the prime candidate, with `dockerd` and `sshd` next.
-Killing the container daemon orphans every running container; killing SSH leaves you locked out
-of a machine that still needs a power cycle. `earlyoom` watches free memory and kills a process
-*you* designate, before the kernel gets involved.
+Patterns seen to work in practice: `'^tensorfold'`, `'^VLLM|^vllm'`, `'^llama-server'`,
+`'^ollama'`. Some projects' own preflight checks assert an exact string — if your stack ships one,
+match what *it* expects rather than what looks reasonable.
 
 ### The liveness guard, and why it exists
 

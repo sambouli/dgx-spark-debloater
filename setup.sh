@@ -22,14 +22,15 @@ DRY=0
 # truncated at 15 chars, so 'VLLM::EngineCore' shows up as 'VLLM::EngineCor'; a
 # pattern anchored on the long form silently matches nothing.
 #
-# It is NOT exhaustive. Other servers (SGLang, TensorRT-LLM, Triton, TGI, ...)
-# will not match, and an unmatched pattern degrades earlyoom to kill-the-largest.
-# That is why setup.sh verifies the pattern against live processes instead of
-# trusting this default. Confirm yours with:
+# There is no universally correct value: it depends on what actually serves on
+# the node. Pick by OBSERVING the process name, never by naming the project or
+# image you launched -- those routinely differ from argv0 inside the container:
 #     docker exec <container> ps -eo comm,rss --sort=-rss | head
-# and pass EARLYOOM_PREFER explicitly for anything outside the default.
+# Examples seen in practice: '^tensorfold', '^VLLM|^vllm', '^llama-server',
+# '^ollama'. An unmatched pattern silently degrades earlyoom to kill-the-largest,
+# which is why this script verifies the pattern against live processes below.
 WITH_EARLYOOM="${WITH_EARLYOOM:-0}"
-EARLYOOM_PREFER="${EARLYOOM_PREFER:-^VLLM|^vllm|llama-server|^ollama}"
+EARLYOOM_PREFER="${EARLYOOM_PREFER:-}"
 
 log()  { printf '%s\n' "$*"; }
 run()  { if [ "$DRY" = 1 ]; then printf '  [dry] %s\n' "$*"; else "$@"; fi; }
@@ -367,9 +368,16 @@ fi
 if [ "$WITH_EARLYOOM" = "1" ]; then
   log "== optional: earlyoom (WITH_EARLYOOM=1) =="
   if [ -z "$EARLYOOM_PREFER" ]; then
-    log "  ERROR: EARLYOOM_PREFER must not be empty."
-    log "         With no --prefer pattern earlyoom kills the LARGEST process,"
-    log "         which is the behaviour this feature exists to avoid."
+    log "  ERROR: EARLYOOM_PREFER is required. There is no safe default:"
+    log "         it must name the process that actually serves on THIS node."
+    log ""
+    log "         Find the real name (comm truncates at 15 chars; image and"
+    log "         project names are NOT reliable indicators of argv0):"
+    log "           docker exec <container> ps -eo comm,rss --sort=-rss | head"
+    log ""
+    log "         Then re-run, e.g.:"
+    log "           sudo WITH_EARLYOOM=1 EARLYOOM_PREFER='^tensorfold' ./setup.sh"
+    log "           sudo WITH_EARLYOOM=1 EARLYOOM_PREFER='^VLLM|^vllm'  ./setup.sh"
     exit 1
   fi
 
