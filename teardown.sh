@@ -58,6 +58,16 @@ if grep -qE '^#[[:space:]]*/swap\.img' /etc/fstab 2>/dev/null; then
   grep -nE '^#[[:space:]]*/swap\.img' /etc/fstab | sed 's/^/          /'
 fi
 
+log "== optional feature: earlyoom =="
+# Only touched if it was opted into. Never assume: check, then act.
+if [ -f /etc/default/earlyoom ] && grep -q 'EARLYOOM_ARGS=' /etc/default/earlyoom 2>/dev/null; then
+  log "  disabling earlyoom + removing /etc/default/earlyoom"
+  run systemctl disable --now earlyoom 2>/dev/null
+  run rm -f /etc/default/earlyoom
+fi
+# The package itself is left installed; remove it with `apt-get purge earlyoom`
+# if you want it gone. Uninstalling is not teardown's job.
+
 log ""
 log "Disabled units are left disabled — review daemons.md and re-enable individually with"
 log "'systemctl enable <unit>' only for what you actually need."

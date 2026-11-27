@@ -3,12 +3,24 @@
 #
 #   ./setup.sh --dry-run    print what would change, change nothing
 #   sudo ./setup.sh         apply
+#   sudo WITH_EARLYOOM=1 EARLYOOM_PREFER='^VLLM' ./setup.sh
+#                         also configure earlyoom (opt-in, see README)
 #
 # Reversible with ./teardown.sh
 set -uo pipefail
 
 DRY=0
 [ "${1:-}" = "--dry-run" ] && DRY=1
+
+# Optional, OFF BY DEFAULT. OOM policy kills processes and the right victim
+# depends entirely on what you run, so it is not part of the baseline.
+#
+# EARLYOOM_PREFER is a full ERE passed straight to --prefer. The default matches
+# the vLLM/llama.cpp worker names as they actually appear in `ps`: comm is
+# truncated at 15 chars, so 'VLLM::EngineCore' shows up as 'VLLM::EngineCor' and
+# a pattern anchored on the long form silently matches nothing.
+WITH_EARLYOOM="${WITH_EARLYOOM:-0}"
+EARLYOOM_PREFER="${EARLYOOM_PREFER:-^VLLM|^vllm|llama-server}"
 
 log()  { printf '%s\n' "$*"; }
 run()  { if [ "$DRY" = 1 ]; then printf '  [dry] %s\n' "$*"; else "$@"; fi; }
@@ -168,7 +180,7 @@ MASKED=(
 )
 
 # ---------------------------------------------------------------------------
-log "== 1/7  disabling units =="
+log "== 1/6  disabling units =="
 for u in "${DISABLED[@]}"; do
   state=$(systemctl is-enabled "$u" 2>&1 || true)
   # 'not-found' / 'bad' / 'error' mean the unit does not exist on this box
@@ -182,7 +194,7 @@ for u in "${DISABLED[@]}"; do
   esac
 done
 
-log "== 2/7  masking units =="
+log "== 2/6  masking units =="
 for u in "${MASKED[@]}"; do
   state=$(systemctl is-enabled "$u" 2>&1 || true)
   case "$state" in not-found|bad|error|unknown) continue ;; esac
@@ -191,7 +203,7 @@ for u in "${MASKED[@]}"; do
   run systemctl mask "$u"
 done
 
-log "== 3/7  headless boot target =="
+log "== 3/6  headless boot target =="
 cur=$(systemctl get-default)
 if [ "$cur" != "multi-user.target" ]; then
   log "  get-default: $cur -> multi-user.target"
@@ -201,7 +213,7 @@ else
   log "  already multi-user.target"
 fi
 
-log "== 4/7  swap off =="
+log "== 4/6  swap off =="
 if [ -e /swap.img ]; then
   log "  swapoff + remove /swap.img"
   run swapoff -a
@@ -219,7 +231,7 @@ if grep -qE '^[^#].*[[:space:]]swap[[:space:]]' /etc/fstab; then
   fi
 fi
 
-log "== 5/7  transparent huge pages: never =="
+log "== 5/6  transparent huge pages: never =="
 if [ -w /sys/kernel/mm/transparent_hugepage/enabled ]; then
   echo never > /sys/kernel/mm/transparent_hugepage/enabled
 fi
@@ -242,7 +254,7 @@ EOF
 fi
 log "  THP: $(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null)"
 
-log "== 6/7  sysctls =="
+log "== 6/6  kernel tuning: sysctls + resource limits =="
 if [ ! -f /etc/sysctl.d/99-inference-node.conf ] || [ "$DRY" = 0 ]; then
   run tee /etc/sysctl.d/99-inference-node.conf >/dev/null <<'EOF'
 # Inference node: large pinned allocations, no background compaction churn.
@@ -260,7 +272,6 @@ fi
 log "  compaction_proactiveness=$(cat /proc/sys/vm/compaction_proactiveness 2>/dev/null)"
 log "  min_free_kbytes=$(cat /proc/sys/vm/min_free_kbytes 2>/dev/null)"
 
-log "== 7/7  memlock / nofile limits =="
 if [ ! -f /etc/security/limits.d/99-inference-node.conf ] || [ "$DRY" = 0 ]; then
   run tee /etc/security/limits.d/99-inference-node.conf >/dev/null <<'EOF'
 # RDMA queue pairs and pinned GPU buffers must be lockable in memory.
@@ -271,29 +282,76 @@ if [ ! -f /etc/security/limits.d/99-inference-node.conf ] || [ "$DRY" = 0 ]; the
 EOF
 fi
 
-log "== optional: earlyoom =="
-if command -v earlyoom >/dev/null 2>&1; then
-  if [ ! -f /etc/default/earlyoom ] || ! grep -q '^EARLYOOM_ARGS=' /etc/default/earlyoom 2>/dev/null; then
-    log "  writing /etc/default/earlyoom"
-    run tee /etc/default/earlyoom >/dev/null <<'EOF'
+# ---------------------------------------------------------------------------
+# Optional, OFF BY DEFAULT.
+#
+# OOM policy is deliberately excluded from the baseline: it kills processes, and
+# the correct victim depends on what you actually serve. Enabling it without a
+# --prefer pattern makes earlyoom fall back to killing the LARGEST process, which
+# is strictly worse than leaving it alone -- you lose the kernel's predictability
+# and keep the surprise. So this refuses to install until you name your engine.
+# ---------------------------------------------------------------------------
+if [ "$WITH_EARLYOOM" = "1" ]; then
+  log "== optional: earlyoom (WITH_EARLYOOM=1) =="
+  if [ -z "$EARLYOOM_PREFER" ]; then
+    log "  ERROR: EARLYOOM_PREFER must not be empty."
+    log "         With no --prefer pattern earlyoom kills the LARGEST process,"
+    log "         which is the behaviour this feature exists to avoid."
+    exit 1
+  fi
+
+  # A pattern that matches nothing is worse than no earlyoom at all: it looks
+  # like protection and silently degrades to kill-the-largest. This is the most
+  # common way the feature is misconfigured, so verify against live processes.
+  matched=$(pgrep -f "$EARLYOOM_PREFER" 2>/dev/null | wc -l)
+  if [ "$matched" -eq 0 ]; then
+    log "  WARNING: pattern '$EARLYOOM_PREFER' matches NO running process."
+    log "           earlyoom would fall back to killing the largest process."
+    log ""
+    log "           Check what your engine is really called (comm truncates at"
+    log "           15 chars -- anchor on what ps shows, not on the cmdline):"
+    log "             ps -eo comm,rss --sort=-rss | head"
+    log "             pgrep -fa '$EARLYOOM_PREFER'"
+    log ""
+    log "           Override once confirmed:"
+    log "             sudo WITH_EARLYOOM=1 EARLYOOM_PREFER='<regex>' ./setup.sh"
+    log ""
+    log "           Pass EARLYOOM_ALLOW_NO_MATCH=1 to install anyway (e.g. the"
+    log "           engine is not started yet on this node)."
+    [ "${EARLYOOM_ALLOW_NO_MATCH:-0}" = "1" ] || exit 1
+    log "  proceeding despite no match (EARLYOOM_ALLOW_NO_MATCH=1)"
+  else
+    log "  pattern matches $matched running process(es) -- ok"
+  fi
+  if ! command -v earlyoom >/dev/null 2>&1; then
+    log "  installing earlyoom"
+    run apt-get install -y earlyoom
+  fi
+  log "  writing /etc/default/earlyoom (prefer=$EARLYOOM_PREFER)"
+  if [ "$DRY" = 0 ]; then
+    tee /etc/default/earlyoom >/dev/null <<EOF
 # Kill the inference engine first; never the infrastructure.
 # -M <free MB>,<min MB>: act when free RAM drops under 1 GiB, stop at 512 MiB
-# -s <free>,<min>:        same for swap (both effectively 0 here)
-# --prefer:               kill inference-engine processes first
-# --avoid:                never touch these
-EARLYOOM_ARGS="-r 3600 -p -M 1048576,524288 -s 100,100 --prefer ^INFERENCE_ENGINE --avoid ^(systemd|sshd|dockerd|containerd|dbus-daemon|NetworkManager|gdm|Xorg|nvidia)"
+# -s <free>,<min>:        same for swap (inert with swap off, protective if it returns)
+# --prefer:               kill processes matching this regex first
+# --avoid:                never touch these, regardless of size
+EARLYOOM_ARGS="-r 3600 -p -M 1048576,524288 -s 100,100 --prefer $EARLYOOM_PREFER --avoid ^(systemd|sshd|dockerd|containerd|dbus-daemon|NetworkManager|gdm|Xorg|nvidia)"
 EOF
+  else
+    echo "  [dry] write /etc/default/earlyoom with --prefer $EARLYOOM_PREFER"
   fi
   run systemctl enable --now earlyoom
   log "  earlyoom: $(systemctl is-active earlyoom 2>/dev/null)"
 else
-  log "  earlyoom not installed — install it (see oom-protection.md):"
-  log "      apt-get install earlyoom"
+  log ""
+  log "skipped (optional): earlyoom OOM protection."
+  log "  The kernel OOM killer scores by resident size, so on a unified-memory"
+  log "  box it may take dockerd or sshd rather than the engine. Consider"
+  log "  WITH_EARLYOOM=1 if you run close to full memory."
 fi
 
 log ""
 log "done. Verify with:"
 log "  systemctl get-default"
 log "  swapon --show"
-log "  systemctl is-active earlyoom"
 log "  cat /proc/sys/vm/compaction_proactiveness"

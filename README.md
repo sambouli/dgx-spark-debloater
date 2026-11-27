@@ -13,10 +13,8 @@ recommendation for a desktop.
 
 **Node count is irrelevant.** Every setting here is per-node and applies identically to a
 single Spark or a rack of them. Nothing depends on how many nodes you have or how they are
-wired together. The one place multi-node changes anything is *operational*, not
-configurative: when ranks span machines, killing one rank aborts the job everywhere, so the
-value of OOM protection shifts from "the job survives" to "the machine stays reachable so you
-can read its logs." See [`oom-protection.md`](oom-protection.md).
+wired together — interface naming, IP addressing and fabric configuration are deliberately
+out of scope, since they belong to your network rather than to this baseline.
 
 ## Contents
 
@@ -24,10 +22,12 @@ can read its logs." See [`oom-protection.md`](oom-protection.md).
 |---|---|
 | [`daemons.md`](daemons.md) | Every unit disabled or masked, with why |
 | [`sysctl.md`](sysctl.md) | VM / network sysctls and the reasoning per value |
-| [`limits-and-swap.md`](limits-and-swap.md) | memlock, nofile, swap policy |
-| [`oom-protection.md`](oom-protection.md) | `earlyoom` + systemd slice: who dies when |
+| [`limits-and-swap.md`](limits-and-swap.md) | memlock, nofile, swap policy, THP |
 | [`setup.sh`](setup.sh) | Idempotent script applying all of the above |
 | [`teardown.sh`](teardown.sh) | Reverses everything in `setup.sh` |
+
+Out of scope on purpose: monitoring and alerting, model serving, and anything
+engine-specific. OOM policy is available but **opt-in and off by default** — see below.
 
 ## Why each category matters
 
@@ -45,12 +45,6 @@ worse than one that fails fast. Hence `compaction_proactiveness=0`, a large
 **Swap off.** Swapping a pinned GPU buffer is not slow, it is fatal — the driver holds
 the page, the kernel thrashes around it, and the node becomes unreachable enough that
 only a power cycle recovers it. Swap is disabled at the source rather than managed.
-
-**OOM protection.** This is the highest-value item on the list. On a unified-memory box
-the kernel OOM killer selects by size, and the largest process is usually `dockerd` or
-`containerd` — killing those takes the whole machine down while you are locked out of
-SSH. `earlyoom` inverts the policy: kill the *inference engine* first, never the
-infrastructure. See [`oom-protection.md`](oom-protection.md).
 
 **memlock unlimited.** RDMA queue pairs must be pinned; without `memlock unlimited` plus
 `IPC_LOCK`, registration fails deep into startup with a confusing error. Set via
@@ -73,6 +67,60 @@ infrastructure. See [`oom-protection.md`](oom-protection.md).
 - Network interface naming, IP addressing and netplan are intentionally absent — they
   belong to your fabric, not to this baseline.
 
+## Optional: earlyoom (off by default)
+
+OOM policy is **not** part of the baseline. It kills processes, and the correct victim depends
+entirely on what you serve — so unlike everything else here, it is a deployment decision rather
+than a debloating one. Enable it explicitly:
+
+```bash
+# verify the pattern matches something real first
+ps -eo comm,rss --sort=-rss | head
+
+sudo WITH_EARLYOOM=1 ./setup.sh                       # shipped default pattern
+sudo WITH_EARLYOOM=1 EARLYOOM_PREFER='vllm|sglang' ./setup.sh   # or your own
+```
+
+The shipped default is `'^VLLM|^vllm|llama-server'`, which covers vLLM and llama.cpp workers as
+they appear in `ps`. Pass `EARLYOOM_PREFER` for anything else — it is a full ERE handed straight
+to `--prefer`.
+
+### Why it exists
+
+On a unified-memory box the kernel OOM killer scores candidates by resident size, so the largest
+process — usually your inference engine — is the prime candidate, with `dockerd` and `sshd` next.
+Killing the container daemon orphans every running container; killing SSH leaves you locked out
+of a machine that still needs a power cycle. `earlyoom` watches free memory and kills a process
+*you* designate, before the kernel gets involved.
+
+### The liveness guard, and why it exists
+
+A `--prefer` pattern that matches nothing is **worse than not installing earlyoom**: it looks like
+protection and silently degrades to kill-the-largest-process. This is by far the most common way
+the feature gets misconfigured — an engine gets renamed or restructured, the pattern goes stale,
+and nobody notices until the OOM killer takes `dockerd` anyway.
+
+So `setup.sh` runs `pgrep -f "$EARLYOOM_PREFER"` and refuses to install if it matches zero running
+processes, printing the commands to find the real name. If your engine legitimately isn't started
+yet on that node, pass `EARLYOOM_ALLOW_NO_MATCH=1` to proceed.
+
+The trap this catches: `comm` is truncated at **15 characters**, so `VLLM::EngineCore` appears as
+`VLLM::EngineCor`. A pattern anchored on the long form matches nothing forever, and every other
+aspect of the setup still looks correct. Verify after enabling:
+
+```bash
+systemctl is-active earlyoom       # active
+ps -o args= -C earlyoom            # shows the live EARLYOOM_ARGS
+journalctl -u earlyoom --since -1d # past kills are logged here
+```
+
+The shipped policy: act under 1 GiB free, `SIGTERM` not `SIGKILL` (so pinned memory is released
+cleanly), rate-limited to one kill per hour, and `--avoid` on `systemd`, `sshd`, `dockerd`,
+`containerd`, `dbus-daemon`, `NetworkManager`, `gdm`, `Xorg`, `nvidia`.
+
+If the workload spans processes or nodes, match **every** worker rather than one role — killing a
+single rank aborts the job everywhere anyway, so a partial teardown buys nothing.
+
 ## Usage
 
 ```bash
@@ -92,7 +140,6 @@ run should report nothing to do.
 systemctl get-default                                  # multi-user.target
 cat /sys/kernel/mm/transparent_hugepage/enabled        # always madvise [never]
 swapon --show                                          # empty
-systemctl is-active earlyoom                           # active
 cat /proc/sys/vm/compaction_proactiveness              # 0
 cat /proc/sys/vm/min_free_kbytes                       # 1048576
 prlimit -p 1 --memlock 2>/dev/null || ulimit -l        # unlimited

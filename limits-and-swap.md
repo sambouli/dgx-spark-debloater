@@ -70,8 +70,6 @@ grep -n swap /etc/fstab        # should show only commented lines
 Notes:
 
 - `/swap.img` on these images is ~17 GiB. Removing it also reclaims that disk.
-- Keep `earlyoom`'s `-s` thresholds configured even with no swap (see `oom-protection.md`) —
-  they are inert today and protective the day someone re-enables it.
 - Do **not** confuse this with `vm.swappiness`. That governs *how* the kernel swaps; this
   removes the ability to. Both are set, deliberately.
 
