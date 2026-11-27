@@ -31,6 +31,16 @@ DRY=0
 # which is why this script verifies the pattern against live processes below.
 WITH_EARLYOOM="${WITH_EARLYOOM:-0}"
 EARLYOOM_PREFER="${EARLYOOM_PREFER:-}"
+# earlyoom's -M is "<SIGTERM KiB>,<SIGKILL KiB>" of MemAvailable. The shipped
+# default (1 GiB / 512 MiB) assumes the engine leaves ~2 GiB of headroom. When it
+# does not, a single long prompt can drop the node under 1 GiB and take the
+# engine down mid-request. Measured on a 2x DGX Spark pair serving a 1M-context
+# MoE: the engine idled at ~3 GiB MemAvailable, a 197k-token prompt arriving
+# alongside a live stream reached 1.01 GiB, and earlyoom fired. 1.5 GiB / 1 GiB
+# leaves room for one more concurrent prefill transient. Raise it further if the
+# engine's own floor (a TF_DS_MEM_FLOOR_GIB-style knob) sits above the trigger.
+EARLYOOM_TERM_KIB="${EARLYOOM_TERM_KIB:-1572864}"    # 1.5 GiB
+EARLYOOM_KILL_KIB="${EARLYOOM_KILL_KIB:-1048576}"    # 1.0 GiB
 
 log()  { printf '%s\n' "$*"; }
 run()  { if [ "$DRY" = 1 ]; then printf '  [dry] %s\n' "$*"; else "$@"; fi; }
@@ -416,11 +426,11 @@ if [ "$WITH_EARLYOOM" = "1" ]; then
   if [ "$DRY" = 0 ]; then
     tee /etc/default/earlyoom >/dev/null <<EOF
 # Kill the inference engine first; never the infrastructure.
-# -M <free MB>,<min MB>: act when free RAM drops under 1 GiB, stop at 512 MiB
+# -M <term KiB>,<kill KiB>: SIGTERM at $EARLYOOM_TERM_KIB KiB, SIGKILL at $EARLYOOM_KILL_KIB KiB of MemAvailable
 # -s <free>,<min>:        same for swap (inert with swap off, protective if it returns)
 # --prefer:               kill processes matching this regex first
 # --avoid:                never touch these, regardless of size
-EARLYOOM_ARGS="-r 3600 -p -M 1048576,524288 -s 100,100 --prefer $EARLYOOM_PREFER --avoid ^(systemd|sshd|dockerd|containerd|dbus-daemon|NetworkManager|gdm|Xorg|nvidia)"
+EARLYOOM_ARGS="-r 3600 -p -M $EARLYOOM_TERM_KIB,$EARLYOOM_KILL_KIB -s 100,100 --prefer $EARLYOOM_PREFER --avoid ^(systemd|sshd|dockerd|containerd|dbus-daemon|NetworkManager|gdm|Xorg|nvidia)"
 EOF
   else
     echo "  [dry] write /etc/default/earlyoom with --prefer $EARLYOOM_PREFER"
@@ -433,10 +443,12 @@ EOF
   run systemctl restart earlyoom
   if [ "$DRY" = 0 ]; then
     live=$(ps -o args= -C earlyoom 2>/dev/null | grep -o -- "--prefer [^ ]*")
-    if [ "$live" = "--prefer $EARLYOOM_PREFER" ]; then
-      log "  earlyoom: active, $live (matches config)"
+    live_m=$(ps -o args= -C earlyoom 2>/dev/null | grep -o -- "-M [^ ]*")
+    if [ "$live" = "--prefer $EARLYOOM_PREFER" ] && [ "$live_m" = "-M $EARLYOOM_TERM_KIB,$EARLYOOM_KILL_KIB" ]; then
+      log "  earlyoom: active, $live $live_m (matches config)"
     else
-      log "  WARNING: earlyoom is running '$live' but config says '--prefer $EARLYOOM_PREFER'"
+      log "  WARNING: earlyoom is running '$live $live_m' but config says"
+      log "           '--prefer $EARLYOOM_PREFER -M $EARLYOOM_TERM_KIB,$EARLYOOM_KILL_KIB'"
       log "           The daemon did not pick up the new config. Check:"
       log "             systemctl status earlyoom ; cat /etc/default/earlyoom"
     fi
