@@ -384,7 +384,11 @@ if [ "$WITH_EARLYOOM" = "1" ]; then
   # A pattern that matches nothing is worse than no earlyoom at all: it looks
   # like protection and silently degrades to kill-the-largest. This is the most
   # common way the feature is misconfigured, so verify against live processes.
-  matched=$(pgrep -f "$EARLYOOM_PREFER" 2>/dev/null | wc -l)
+  # Match the way earlyoom does: against comm (comm), NOT the full cmdline.
+  # `pgrep -f` anchors on argv0 of the cmdline, so a pattern like ^tensorfold
+  # reports zero while the process is alive -- a false FAIL that pushed users
+  # into "fixing" a correct config.
+  matched=$(pgrep "$EARLYOOM_PREFER" 2>/dev/null | wc -l)
   if [ "$matched" -eq 0 ]; then
     log "  WARNING: pattern '$EARLYOOM_PREFER' matches NO running process."
     log "           earlyoom would fall back to killing the largest process."
@@ -392,7 +396,7 @@ if [ "$WITH_EARLYOOM" = "1" ]; then
     log "           Check what your engine is really called (comm truncates at"
     log "           15 chars -- anchor on what ps shows, not on the cmdline):"
     log "             ps -eo comm,rss --sort=-rss | head"
-    log "             pgrep -fa '$EARLYOOM_PREFER'"
+    log "             ps -eo comm= | pgrep '$EARLYOOM_PREFER'"
     log ""
     log "           Override once confirmed:"
     log "             sudo WITH_EARLYOOM=1 EARLYOOM_PREFER='<regex>' ./setup.sh"

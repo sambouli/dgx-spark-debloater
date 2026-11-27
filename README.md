@@ -101,6 +101,21 @@ Patterns seen to work in practice: `'^tensorfold'`, `'^VLLM|^vllm'`, `'^llama-se
 `'^ollama'`. Some projects' own preflight checks assert an exact string — if your stack ships one,
 match what *it* expects rather than what looks reasonable.
 
+### Match the way earlyoom matches
+
+earlyoom tests `--prefer` against **`comm`**, the 15-character kernel process name — not the full
+command line. Verify a pattern with the same rule:
+
+```bash
+pgrep '^tensorfold'          # correct: matches comm
+pgrep -f '^tensorfold'       # WRONG: anchors on argv0 of the cmdline, reports 0
+```
+
+`pgrep -f '<pattern>'` returns nothing for a live `tensorfold` process, which reads as "pattern is
+dead" and sends you off changing a configuration that was already correct. This is also why the
+name must fit in 15 characters and why a framework's binary name often differs from what you
+launched.
+
 ### The liveness guard, and why it exists
 
 A `--prefer` pattern that matches nothing is **worse than not installing earlyoom**: it looks like
