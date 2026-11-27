@@ -74,16 +74,30 @@ entirely on what you serve — so unlike everything else here, it is a deploymen
 than a debloating one. Enable it explicitly:
 
 ```bash
-# verify the pattern matches something real first
-ps -eo comm,rss --sort=-rss | head
+# find out what your engine's process is REALLY called before trusting any default
+docker exec <container> ps -eo comm,rss --sort=-rss | head
 
-sudo WITH_EARLYOOM=1 ./setup.sh                       # shipped default pattern
-sudo WITH_EARLYOOM=1 EARLYOOM_PREFER='vllm|sglang' ./setup.sh   # or your own
+sudo WITH_EARLYOOM=1 ./setup.sh                                   # shipped default
+sudo WITH_EARLYOOM=1 EARLYOOM_PREFER='sglang' ./setup.sh          # your own
 ```
 
-The shipped default is `'^VLLM|^vllm|llama-server'`, which covers vLLM and llama.cpp workers as
-they appear in `ps`. Pass `EARLYOOM_PREFER` for anything else — it is a full ERE handed straight
-to `--prefer`.
+### Scope of the shipped default
+
+It is `'^VLLM|^vllm|llama-server|^ollama'` — verified against live containers, covering
+**vLLM, llama.cpp and Ollama**. It is deliberately narrow, and it is **not** a general-purpose
+inference pattern. Servers such as SGLang, TensorRT-LLM, Triton or TGI will not match it; pass
+`EARLYOOM_PREFER` for those.
+
+Two reasons for the narrowness:
+
+- A pattern that matches nothing is worse than no earlyoom at all (see the guard below), so a
+  broad guess-the-name default would be actively harmful.
+- The obvious widening — adding `python3` — is a trap. Most Python inference servers *also* show
+  a `python3` process, so matching it would let earlyoom kill unrelated host Python: monitoring,
+  cron jobs, your own shells. Match the worker's real name, never the interpreter.
+
+`^VLLM` is anchored on the truncated form on purpose: `comm` cuts off at 15 characters, so
+`VLLM::EngineCore` appears as `VLLM::EngineCor`.
 
 ### Why it exists
 

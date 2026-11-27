@@ -3,7 +3,7 @@
 #
 #   ./setup.sh --dry-run    print what would change, change nothing
 #   sudo ./setup.sh         apply
-#   sudo WITH_EARLYOOM=1 EARLYOOM_PREFER='^VLLM' ./setup.sh
+#   sudo WITH_EARLYOOM=1 EARLYOOM_PREFER='sglang' ./setup.sh
 #                         also configure earlyoom (opt-in, see README)
 #
 # Reversible with ./teardown.sh
@@ -15,12 +15,21 @@ DRY=0
 # Optional, OFF BY DEFAULT. OOM policy kills processes and the right victim
 # depends entirely on what you run, so it is not part of the baseline.
 #
-# EARLYOOM_PREFER is a full ERE passed straight to --prefer. The default matches
-# the vLLM/llama.cpp worker names as they actually appear in `ps`: comm is
-# truncated at 15 chars, so 'VLLM::EngineCore' shows up as 'VLLM::EngineCor' and
-# a pattern anchored on the long form silently matches nothing.
+# EARLYOOM_PREFER is a full ERE passed straight to --prefer.
+#
+# The default covers the engines this baseline was written against -- vLLM,
+# llama.cpp and Ollama -- as their process names ACTUALLY appear in `ps`. comm is
+# truncated at 15 chars, so 'VLLM::EngineCore' shows up as 'VLLM::EngineCor'; a
+# pattern anchored on the long form silently matches nothing.
+#
+# It is NOT exhaustive. Other servers (SGLang, TensorRT-LLM, Triton, TGI, ...)
+# will not match, and an unmatched pattern degrades earlyoom to kill-the-largest.
+# That is why setup.sh verifies the pattern against live processes instead of
+# trusting this default. Confirm yours with:
+#     docker exec <container> ps -eo comm,rss --sort=-rss | head
+# and pass EARLYOOM_PREFER explicitly for anything outside the default.
 WITH_EARLYOOM="${WITH_EARLYOOM:-0}"
-EARLYOOM_PREFER="${EARLYOOM_PREFER:-^VLLM|^vllm|llama-server}"
+EARLYOOM_PREFER="${EARLYOOM_PREFER:-^VLLM|^vllm|llama-server|^ollama}"
 
 log()  { printf '%s\n' "$*"; }
 run()  { if [ "$DRY" = 1 ]; then printf '  [dry] %s\n' "$*"; else "$@"; fi; }
